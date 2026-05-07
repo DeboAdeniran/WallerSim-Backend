@@ -6,7 +6,9 @@ import com.example.walletsim_backend.dto.response.AuthResponse;
 import com.example.walletsim_backend.dto.response.ErrorDetail;
 import com.example.walletsim_backend.dto.response.UserSummary;
 import com.example.walletsim_backend.enums.ErrorCode;
+import com.example.walletsim_backend.enums.KycTier;
 import com.example.walletsim_backend.enums.OtpType;
+import com.example.walletsim_backend.enums.Role;
 import com.example.walletsim_backend.model.OtpEntity;
 import com.example.walletsim_backend.model.UserEntity;
 import com.example.walletsim_backend.repository.OtpRepository;
@@ -17,11 +19,11 @@ import com.example.walletsim_backend.util.OTPGenerator;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -44,9 +46,9 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public ApiResponse<String> register(RegisterRequest request) {
-        if (userRepository.existsByEmail(request.getEmail())){
+        if (userRepository.existsByEmail(request.getEmail())) {
             ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_TAKEN.name(), null);
-            return ApiResponse.error("Email is already in use",error, 409);
+            return ApiResponse.error("Email is already in use", error, 409);
         }
 
         UserEntity user = UserEntity.builder()
@@ -54,7 +56,9 @@ public class AuthServiceImpl implements AuthService {
                 .firstName(request.getFirstName())
                 .lastName(request.getLastName())
                 .password(bCryptPasswordEncoder.encode(request.getPassword()))
-//                .referralCode(request.getReferralCode())
+                .emailVerified(false)
+                .kycTier(KycTier.NONE)
+                .role(Role.USER)
                 .build();
         UserEntity createdUser = userRepository.save(user);
 
@@ -70,37 +74,41 @@ public class AuthServiceImpl implements AuthService {
                 .recipient(createdUser.getEmail())
                 .subject("Activate your account")
                 .messageBody(String.format("""
-                                                        Activate your account
-                        Hi %s,
-                        
-                        Before you get started, confirm your email to activate your account.
-                        Enter the OTP code for confirmation.
-                                                        OTP : %s
-                        
-                        Copy and paste the OTP to activate your account
-                        """, createdUser.getFirstName(), otpUser.getCode()))
+                                        Activate your account
+                Hi %s,
+                
+                Before you get started, confirm your email to activate your account.
+                Enter the OTP code for confirmation.
+                
+                OTP: %s
+                
+                This OTP will expire in 10 minutes.
+                Copy and paste the OTP to activate your account.
+                """, createdUser.getFirstName(), otpUser.getCode()))
                 .build();
         emailService.sendEmailAlert(emailDetails);
-        return ApiResponse.success(null,"Registration successful. Please check your email to verify your account.", 201);
+
+        return ApiResponse.success(null,"Password reset OTP sent to your email. Please check your inbox and enter the code to reset your password.", 200);
     }
 
     @Override
     public ApiResponse<AuthResponse> verifyEmail(VerifyEmailRequest request) {
-        if (!otpRepository.existsByEmail(request.getEmail())){
+        if (!otpRepository.existsByEmail(request.getEmail())) {
             ErrorDetail error = new ErrorDetail(ErrorCode.TOKEN_INVALID.name(), null);
-            return ApiResponse.error("Token is invalid",error,401);
+            return ApiResponse.error("Token is invalid", error, 401);
         }
+
         Optional<OtpEntity> otpOptional = otpRepository.findByCode(request.getOtp());
-        if (otpOptional.isEmpty()){
+        if (otpOptional.isEmpty()) {
             ErrorDetail error = new ErrorDetail(ErrorCode.TOKEN_INVALID.name(), null);
-            return ApiResponse.error("Token is invalid",error,401);
+            return ApiResponse.error("Token is invalid", error, 401);
         }
 
         OtpEntity otp = otpOptional.get();
 
-        if (otp.isUsed()){
+        if (otp.isUsed()) {
             ErrorDetail error = new ErrorDetail(ErrorCode.TOKEN_INVALID.name(), null);
-            return ApiResponse.error("OTP has already been used",error,401);
+            return ApiResponse.error("OTP has already been used", error, 401);
         }
 
         if (otp.getExpiresAt().isBefore(LocalDateTime.now())) {
@@ -122,7 +130,7 @@ public class AuthServiceImpl implements AuthService {
         UserEntity user = userOptional.get();
 
         if (user.isEmailVerified()) {
-            ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_TAKEN.name(), null);
+            ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_ALREADY_VERIFIED.name(), null);
             return ApiResponse.error("Email is already verified", error, 400);
         }
 
@@ -132,8 +140,9 @@ public class AuthServiceImpl implements AuthService {
         user.setEmailVerified(true);
         userRepository.save(user);
 
-        String accessToken  = jwtService.generateAccessToken((UserDetails) user);
-        String refreshToken = jwtService.generateRefreshToken((UserDetails) user);
+        UserPrincipal userPrincipal = new UserPrincipal(user);
+        String accessToken  = jwtService.generateAccessToken(userPrincipal);
+        String refreshToken = jwtService.generateRefreshToken(userPrincipal);
 
         AuthResponse authResponse = AuthResponse.builder()
                 .accessToken(accessToken)
@@ -163,17 +172,17 @@ public class AuthServiceImpl implements AuthService {
         UserEntity user = userOptional.get();
 
         if (user.isEmailVerified()) {
-            ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_TAKEN.name(), null);
+            ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_ALREADY_VERIFIED.name(), null);
             return ApiResponse.error("Email is already verified", error, 400);
         }
 
-        Optional<OtpEntity> existingOtp = otpRepository.findByEmail(request.getEmail());
-        existingOtp.ifPresent(otp -> {
+        List<OtpEntity> existingOtps = otpRepository.findAllByEmail(request.getEmail());
+        existingOtps.forEach(otp -> {
             if (!otp.isUsed() && otp.getType() == OtpType.EMAIL_VERIFICATION) {
                 otp.setUsed(true);
-                otpRepository.save(otp);
             }
         });
+        otpRepository.saveAll(existingOtps);
 
         OtpEntity newOtp = OtpEntity.builder()
                 .email(request.getEmail())
@@ -209,42 +218,86 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public ApiResponse<AuthResponse> login(LoginRequest request) {
-
         Authentication authenticate = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.getEmail(),request.getPassword())
+                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
         );
-        if (authenticate.isAuthenticated()){
-            Optional<UserEntity> userOptional = userRepository.findByEmail(request.getEmail());
-            if(userOptional.isPresent()){
-                UserEntity user = userOptional.get();
 
-                if(!user.isEmailVerified()){
-                    ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_NOT_VERIFIED.name(),null);
-                    return ApiResponse.error("Please verify your email before logging in", error, 403);
-                }
+        if (authenticate.isAuthenticated()) {
+            UserPrincipal userPrincipal = (UserPrincipal) authenticate.getPrincipal();
+            assert userPrincipal != null;
+            UserEntity user = userPrincipal.getUser();
 
-                String accessToken  = jwtService.generateAccessToken((UserDetails) user);
-                String refreshToken = jwtService.generateRefreshToken((UserDetails) user);
-
-                UserSummary userSummary = UserSummary.builder()
-                .id(String.valueOf(user.getId()))
-                .email(user.getEmail())
-                .firstName(user.getFirstName())
-                .kycTier(user.getKycTier())
-                .emailVerified(user.isEmailVerified())
-                .build();
-
-                AuthResponse authResponse = AuthResponse.builder()
-                        .accessToken(accessToken)
-                        .refreshToken(refreshToken)
-                        .tokenType("jwt token")
-                        .expiresIn(900)
-                        .user(userSummary)
-                        .build();
-                return ApiResponse.success(authResponse,"Login Successful",200);
+            if (!user.isEmailVerified()) {
+                ErrorDetail error = new ErrorDetail(ErrorCode.EMAIL_NOT_VERIFIED.name(), null);
+                return ApiResponse.error("Please verify your email before logging in", error, 403);
             }
+
+            String accessToken  = jwtService.generateAccessToken(userPrincipal);
+            String refreshToken = jwtService.generateRefreshToken(userPrincipal);
+
+            UserSummary userSummary = UserSummary.builder()
+                    .id(String.valueOf(user.getId()))
+                    .email(user.getEmail())
+                    .firstName(user.getFirstName())
+                    .kycTier(user.getKycTier())
+                    .emailVerified(user.isEmailVerified())
+                    .build();
+
+            AuthResponse authResponse = AuthResponse.builder()
+                    .accessToken(accessToken)
+                    .refreshToken(refreshToken)
+                    .tokenType("Bearer")
+                    .expiresIn(900)
+                    .requires2FA(user.isTwoFAEnabled())
+                    .user(userSummary)
+                    .build();
+
+            return ApiResponse.success(authResponse, "Login Successful", 200);
         }
-        ErrorDetail error = new ErrorDetail(ErrorCode.INVALID_CREDENTIALS.name(),null);
-        return ApiResponse.error("Invalid email or password",error, 401);
+
+        ErrorDetail error = new ErrorDetail(ErrorCode.INVALID_CREDENTIALS.name(), null);
+        return ApiResponse.error("Invalid email or password", error, 401);
+    }
+
+    @Override
+    public ApiResponse<String> forgotPassword(ForgotPasswordRequest request) {
+        boolean emailExists =  userRepository.existsByEmail(request.getEmail());
+        if (emailExists) {
+            OtpEntity otpEntity = OtpEntity.builder()
+                    .email(request.getEmail())
+                    .code(OTPGenerator.generateOTP())
+                    .type(OtpType.PASSWORD_RESET)
+                    .expiresAt(LocalDateTime.now().plusMinutes(10))
+                    .build();
+            OtpEntity otpUser = otpRepository.save(otpEntity);
+            EmailDetails emailDetails = EmailDetails.builder()
+                    .recipient(request.getEmail())
+                    .subject("Password Reset Request - OTP Verification")
+                    .messageBody(String.format("""
+                                                    Password Reset Request
+                                                    
+                            Hello,
+                                                   
+                            We received a request to reset the password for your account.
+                            To complete the password reset process, please use the following OTP:
+                                          
+                            OTP: %s
+                                          
+                            This OTP is valid for the next 10 minutes.
+                                            
+                            For security reasons:
+                            • Never share this OTP with anyone
+                            • If you didn't request a password reset, please ignore this email
+                            • Contact our support team immediately if you suspect unauthorized access
+                                           
+                            Copy and paste the OTP code on the password reset page to continue.
+                                            
+                            Thank you,
+                            WalletSim Team
+                            """, otpUser.getCode()))
+                    .build();
+            emailService.sendEmailAlert(emailDetails);
+        }
+        return ApiResponse.success(null,"If an account exists with this email, a password reset OTP has been sent.", 200);
     }
 }

@@ -44,6 +44,8 @@ public class UserEntity {
     @Column(nullable = true)
     private String referredBy;
     @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
     private Role role = Role.USER;
     private boolean suspended = false;
     @CreatedDate

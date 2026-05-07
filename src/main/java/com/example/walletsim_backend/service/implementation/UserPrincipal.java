@@ -16,9 +16,15 @@ public class UserPrincipal implements UserDetails {
         this.user = user;
     }
 
+    public UserEntity getUser(){
+        return user;
+    }
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return Collections.singleton(new SimpleGrantedAuthority(user.getRole().name()));
+        if (user.getRole() == null) {
+            return Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER"));
+        }
+        return Collections.singleton(new SimpleGrantedAuthority("ROLE_" +user.getRole().name()));
     }
 
     @Override
@@ -33,7 +39,7 @@ public class UserPrincipal implements UserDetails {
 
     @Override
     public boolean isAccountNonExpired() {
-        return UserDetails.super.isAccountNonExpired();
+        return true;
     }
 
     @Override
@@ -43,7 +49,7 @@ public class UserPrincipal implements UserDetails {
 
     @Override
     public boolean isCredentialsNonExpired() {
-        return UserDetails.super.isCredentialsNonExpired();
+        return true;
     }
 
     @Override
